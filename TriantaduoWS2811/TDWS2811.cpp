@@ -23,6 +23,15 @@ SOFTWARE.
 #include <Arduino.h>
 #include "TDWS2811.h"
 
+#define CLOCK_PIN 2
+#define CLOCK_FIO_PINSEL 4
+
+#define LATCH_PIN 3
+#define LATCH_FIO_PINSEL 5
+
+#define DATA_PIN 4
+#define DATA_FIO_PINSEL 6
+
 TDWS2811 *TDWS2811::pTD = {nullptr};
 
 TDWS2811::TDWS2811()
@@ -37,7 +46,6 @@ TDWS2811::TDWS2811()
   hw = &pFlex->hardware();
 
   /* Now configure all the things */
-  configurePins();
   configurePll();
   configureFlexIO();
   configureDma();
@@ -73,75 +81,143 @@ void TDWS2811::dmaIsr(void)
     __asm__ __volatile__("nop\n\t"); //Some race condition between clearInterrupt() and the return of the ISR.  If we don't delay here, the ISR will fire again.
 }
 
-void TDWS2811::configurePins(void)
-{
-  /* Basic pin setup */
-  pinMode(2, OUTPUT);
-  pinMode(3, OUTPUT);
-  pinMode(4, OUTPUT);
-
-  /* High speed and drive strength configuration */
-  uint32_t pinConfig;
-  pinConfig = IOMUXC_PAD_DSE(7) + IOMUXC_PAD_SPEED(3) + ~IOMUXC_PAD_PKE + ~IOMUXC_PAD_SRE;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_04 |= pinConfig;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_04 &= ~pinConfig;
-  pinConfig = IOMUXC_PAD_DSE(6) + IOMUXC_PAD_SPEED(3) + ~IOMUXC_PAD_PKE + ~IOMUXC_PAD_SRE;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_05 |= pinConfig;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_05 &= ~pinConfig;
-  pinConfig = IOMUXC_PAD_DSE(7) + IOMUXC_PAD_SPEED(3) + ~IOMUXC_PAD_PKE + ~IOMUXC_PAD_SRE;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_06 |= pinConfig;
-  IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_06 &= ~pinConfig;
-}
-
 void TDWS2811::configureFlexIO(void)
 {
-  /* Map the FlexIO pins */
-  pFlex->mapIOPinToFlexPin(2);
-  pFlex->mapIOPinToFlexPin(3);
-  pFlex->mapIOPinToFlexPin(4);
+  *portModeRegister(DATA_PIN) |= digitalPinToBitMask(DATA_PIN);
+  *portControlRegister(DATA_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  // SION + ALT4 (FLEXIO1_FLEXIO6) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_06)
+  *portConfigRegister(DATA_PIN) = 0x14;
 
-  /* And set up the pin mux */
-  pFlex->setIOPinToFlexMode(2);
-  pFlex->setIOPinToFlexMode(3);
-  pFlex->setIOPinToFlexMode(4);
+  *portModeRegister(LATCH_PIN) |= digitalPinToBitMask(LATCH_PIN);
+  *portControlRegister(LATCH_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  // SION + ALT4 (FLEXIO1_FLEXIO05) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_05)
+  *portConfigRegister(LATCH_PIN) = 0x14;
 
-  /* Enable the clock */
-  hw->clock_gate_register |= hw->clock_gate_mask;
+  *portModeRegister(CLOCK_PIN) |= digitalPinToBitMask(CLOCK_PIN);
+  *portControlRegister(CLOCK_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  // SION + ALT4 (FLEXIO1_FLEXIO04) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_04)
+  *portConfigRegister(CLOCK_PIN) = 0x14;
 
-  /* Enable the FlexIO */
-  p->CTRL = FLEXIO_CTRL_FLEXEN;
+  // Disable flexio1 clock gate see 14.7.24 page 1087
+  CCM_CCGR5 &= ~CCM_CCGR5_FLEXIO1(CCM_CCGR_ON);
+  // FlexIO1 clock select | Clock divider register pre divider | Clock divider register post divider
+  CCM_CDCDR &= ~(CCM_CDCDR_FLEXIO1_CLK_SEL(3) | CCM_CDCDR_FLEXIO1_CLK_PRED(7) | CCM_CDCDR_FLEXIO1_CLK_PODF(7));
+  // Derive clock from PLL5 clock 14.7.8 page 1059 | Divide by (4 + 1 = 5) | Divide by (0 + 1 = 1)
+  CCM_CDCDR |= CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(0);
+  // Enable flexio1 clock gate see 14.7.24 page 1087
+  CCM_CCGR5 |= CCM_CCGR5_FLEXIO1(CCM_CCGR_ON);
 
-  /* Shifter configuration, see reference manual for a description of each register */
-  /* Note that shifter 4, although unused, must be configured and tied into the chain.  If it's not, there's a data glitch that trips us up.
-  /* See the Github README for more details. */
-  p->SHIFTCTL[0] = 0x00830602;
-  p->SHIFTCTL[1] = 0x00800002;
-  p->SHIFTCTL[2] = 0x00800002;
-  p->SHIFTCTL[3] = 0x00800002;
-  p->SHIFTCTL[4] = 0x00800002;
+  // Shifter control 50.5.1.14 page 2925
+  // SHIFTER0 is configured to output on DIN = pin 8
+  IMXRT_FLEXIO1_S.SHIFTCTL[0] =
+      // Timer select -> TIMER0 controls logic and shift clock
+      FLEXIO_SHIFTCTL_TIMSEL(0) |
+      // Timer polarity -> shift on negative edge of shift clock
+      FLEXIO_SHIFTCTL_TIMPOL |
+      // Shifter pin configuration -> shifter pin output
+      FLEXIO_SHIFTCTL_PINCFG(3) |
+      // Shifter pin select FLEXIO06 pin (DATA on pin 4)
+      FLEXIO_SHIFTCTL_PINSEL(DATA_FIO_PINSEL) |
+      // Shifter pin polarity -> pin is active high
+      (FLEXIO_SHIFTCTL_PINPOL & 0) |
+      // Shifter mode -> Transmit mode. Load SHIFTBUF contents into
+      // the shifter on expiration of the Timer
+      FLEXIO_SHIFTCTL_SMOD(2);
+  // SHIFTERS 1-3 do not output to a pin
+  IMXRT_FLEXIO1_S.SHIFTCTL[1] =
+      FLEXIO_SHIFTCTL_TIMPOL | FLEXIO_SHIFTCTL_SMOD(2);
+  IMXRT_FLEXIO1_S.SHIFTCTL[2] =
+      FLEXIO_SHIFTCTL_TIMPOL | FLEXIO_SHIFTCTL_SMOD(2);
+  IMXRT_FLEXIO1_S.SHIFTCTL[3] =
+      FLEXIO_SHIFTCTL_TIMPOL | FLEXIO_SHIFTCTL_SMOD(2);
 
-  p->SHIFTCFG[0] = 0x00000100;
-  p->SHIFTCFG[1] = 0x00000100;
-  p->SHIFTCFG[2] = 0x00000100;
-  p->SHIFTCFG[3] = 0x00000100;
-  p->SHIFTCFG[4] = 0x00000100;
+  // Shifter configuration 50.5.1.15 page 2927
+  // SHIFTER0 shifts 1 bit on each clock and has SHIFTER(0+1) as source
+  IMXRT_FLEXIO1_S.SHIFTCFG[0] =
+      // 1-bit shift on each shift clock
+      FLEXIO_SHIFTCFG_PWIDTH(0) |
+      // Input source for shifter is output of Shifter N+1
+      FLEXIO_SHIFTCFG_INSRC;
+  // Same for shifters 1 - 3
+  IMXRT_FLEXIO1_S.SHIFTCFG[1] = FLEXIO_SHIFTCFG_INSRC;
+  IMXRT_FLEXIO1_S.SHIFTCFG[2] = FLEXIO_SHIFTCFG_INSRC;
+  // Illegal input source for shifter 3 ??????
+  IMXRT_FLEXIO1_S.SHIFTCFG[3] = FLEXIO_SHIFTCFG_INSRC;
 
-  /* Timer configuration, see reference manual for a description of each register */
-  p->TIMCFG[0] = 0x00000200;
-  p->TIMCFG[1] = 0x00000100;
+  // Timer configuration 50.5.1.21.4 page 2935
+  IMXRT_FLEXIO1_S.TIMCFG[0] =
+      // Timer output is logic 1 when enabled, not affected by reset
+      FLEXIO_TIMCFG_TIMOUT(0) |
+      // Decrement counter on flexio clock, shift clock = timer output
+      FLEXIO_TIMCFG_TIMDEC(0) |
+      // Timer never resets
+      FLEXIO_TIMCFG_TIMRST(0) |
+      // Timer never disabled
+      FLEXIO_TIMCFG_TIMDIS(0) |
+      // Timer enabled on trigger high (shifter 0 status flag)
+      FLEXIO_TIMCFG_TIMENA(2) |
+      // Stop bit disabled
+      FLEXIO_TIMCFG_TSTOP(0) |
+      // Start bit disabled
+      (FLEXIO_TIMCFG_TSTART & 0);
+  IMXRT_FLEXIO1_S.TIMCFG[1] =
+      // Timer enabled on timer N-1 enable
+      FLEXIO_TIMCFG_TIMENA(1);
 
-  p->TIMCTL[0] = 0x01C30401;
-  p->TIMCTL[1] = 0x00030503;
+  // Timer control 50.5.1.20 page 2932
+  // Triggered after loading SHIFTER0 from SHIFTBUF0 50.5.1.16.3 page 2929
+  // TIMER0 is configured to output on BCK = pin 10
+  IMXRT_FLEXIO1_S.TIMCTL[0] =
+      // Trigger select -> triggers on SHIFTER[N=0] status flag (4*N+1)
+      FLEXIO_TIMCTL_TRGSEL(1) |
+      // Trigger polarity -> trigger active low
+      FLEXIO_TIMCTL_TRGPOL |
+      // Trigger source -> internal trigger selected
+      FLEXIO_TIMCTL_TRGSRC |
+      // Timer pin configuration -> timer pin output
+      FLEXIO_TIMCTL_PINCFG(3) |
+      // Timer pin select -> FLEXIO04 (CLOCK on pin 2)
+      FLEXIO_TIMCTL_PINSEL(CLOCK_FIO_PINSEL) |
+      // Timer pin polarity -> active high
+      (FLEXIO_TIMCTL_PINPOL & 0) |
+      // Timer mode -> dual 8 bit counters baud mode
+      FLEXIO_TIMCTL_TIMOD(1);
+  // No trigger is used, timer is enabled on TIMER0
+  // TIMER1 is configured to output on BCK = pin 10
+  IMXRT_FLEXIO1_S.TIMCTL[1] =
+      // Timer pin configuration -> timer pin output
+      FLEXIO_TIMCTL_PINCFG(3) |
+      // Timer pin select -> FLEXIO05 (LATCH on pin 3)
+      FLEXIO_TIMCTL_PINSEL(LATCH_FIO_PINSEL) |
+      // Timer pin polarity -> active high
+      (FLEXIO_TIMCTL_PINPOL & 0) |
+      // Timer mode -> single 16-bit counter mode
+      FLEXIO_TIMCTL_TIMOD(3);
 
-  p->TIMCMP[0] = 0x0000BF00;
-  p->TIMCMP[1] = 0x0000001F;
+  // Timer compare 50.5.1.22 page 2937
+  // The upper 8 bits configure the number of bits = (cmp[15:8] + 1) / 2
+  // Upper 8 bits -> 4 x 32 bits -> 128 * 2 -> 256 - 1 = 0xFF voor 128 bits
+  // The lower 8 bits configure baud rate divider = (cmp[ 7:0] + 1) * 2
+  // Lower 8 bits -> (0 + 1) * 2 -> divide frequency by 2
+  IMXRT_FLEXIO1_S.TIMCMP[0] = 0x0000FF00;
+  // Timer compare 50.3.3.3 page 2891
+  // Configure baud rate of the shift clock (cmp[15:0] + 1) * 2
+  // -> (31 + 1) * 2 -> divide frequency by 64
+  // When the counter equals zero and decrements the timer output toggles
+  // Pulses generated -> 32 pulses of TIMER0 and 1 pulse of TIMER1
+  IMXRT_FLEXIO1_S.TIMCMP[1] = 0x0000001F;
 
-  /* Finally, set up the values to be loaded into the shift registers at the beginning of each bit */
-  p->SHIFTBUF[0] = 0xFFFFFFFF;
-  p->SHIFTBUFBIS[1] = 0xAAAAAAAA; //Identifiable pattern should DMA fail to write SHIFTBUFBIS[1]
-  p->SHIFTBUF[2] = 0x00000000;
-  p->SHIFTBUF[3] = 0x00000000;
-  p->SHIFTBUF[3] = 0x00000000;
+  // Shiftbuffers 1 & 2 get filled by DMA later. Start with all zero's
+  // to reset/latch the led's. See 50.5.1.6.3 page 2918 for DMA triggering.
+  IMXRT_FLEXIO1_S.SHIFTBUFBIS[0] = 0x00000000;
+  IMXRT_FLEXIO1_S.SHIFTBUFBIS[1] = 0x00000000;
+  IMXRT_FLEXIO1_S.SHIFTBUFBIS[2] = 0x00000000;
+  IMXRT_FLEXIO1_S.SHIFTBUFBIS[3] = 0x00000000;
+  // Enable DMA trigger when SHIFTBUF[1 or 2] is loaded onto the shifter
+  IMXRT_FLEXIO1_S.SHIFTSDEN |= 0x06;
+  // Enable flexio, SHIFTBUF[0] has been written, so TIMER0 will start
+  // and other buffers are also ready so no errors in shifting data
+  IMXRT_FLEXIO1_S.CTRL = FLEXIO_CTRL_FLEXEN;
 }
 
 void TDWS2811::configurePll(void)
@@ -157,22 +233,22 @@ void TDWS2811::configurePll(void)
                          CCM_ANALOG_PLL_VIDEO_BYPASS_MASK | CCM_ANALOG_PLL_VIDEO_BYPASS_CLK_SRC(0);
 
   /* Set numerator and denominator */
-  CCM_ANALOG_PLL_VIDEO_NUM = CCM_ANALOG_PLL_VIDEO_NUM_A(0);
-  CCM_ANALOG_PLL_VIDEO_DENOM = CCM_ANALOG_PLL_VIDEO_DENOM_B(12);
+  CCM_ANALOG_PLL_VIDEO_NUM = CCM_ANALOG_PLL_VIDEO_NUM_A(2);
+  CCM_ANALOG_PLL_VIDEO_DENOM = CCM_ANALOG_PLL_VIDEO_DENOM_B(3);
 
   /* Set DIV */
   pllVideo = (CCM_ANALOG_PLL_VIDEO & (~(CCM_ANALOG_PLL_VIDEO_DIV_SELECT_MASK | CCM_ANALOG_PLL_VIDEO_POWERDOWN_MASK))) |
-             CCM_ANALOG_PLL_VIDEO_ENABLE_MASK | CCM_ANALOG_PLL_VIDEO_DIV_SELECT(32);
+             CCM_ANALOG_PLL_VIDEO_ENABLE_MASK | CCM_ANALOG_PLL_VIDEO_DIV_SELECT(42); //32??
 
   /* Set the post divider.  To reduce operation by a factor of 4 (for debugging) change from a divide ratio of 2 to 4 */
   pllVideo |= CCM_ANALOG_PLL_VIDEO_POST_DIV_SELECT(2);
-  //  pllVideo |= CCM_ANALOG_PLL_VIDEO_POST_DIV_SELECT(4);
+  // pllVideo |= CCM_ANALOG_PLL_VIDEO_POST_DIV_SELECT(0);
 
   /* Write the PLL divider and post divider to the configuration register */
   CCM_ANALOG_PLL_VIDEO = pllVideo;
 
   /* Don't remember, TODO: remember */
-  CCM_ANALOG_MISC2 = (CCM_ANALOG_MISC2 & (~CCM_ANALOG_MISC2_VIDEO_DIV_MASK)) | CCM_ANALOG_MISC2_VIDEO_DIV(2);
+  CCM_ANALOG_MISC2 = (CCM_ANALOG_MISC2 & (~CCM_ANALOG_MISC2_VIDEO_DIV_MASK)) | CCM_ANALOG_MISC2_VIDEO_DIV(0); //2?
 
   /* Wait for the PLL to lock.  If it doesn't lock, well, wait some more. */
   while ((CCM_ANALOG_PLL_VIDEO & CCM_ANALOG_PLL_VIDEO_LOCK_MASK) == 0)
@@ -186,7 +262,9 @@ void TDWS2811::configurePll(void)
   hw->clock_gate_register &= ~(uint32_t(hw->clock_gate_mask));
 
   /* Set FLEXIO1_CLK_PRED. Set PODF=0 for full speed operation, PDOF=7 for 1/8 speed operation for debugging */
-  CCM_CDCDR = (CCM_CDCDR & ~(CCM_CDCDR_FLEXIO1_CLK_SEL(3) | CCM_CDCDR_FLEXIO1_CLK_PRED(7) | CCM_CDCDR_FLEXIO1_CLK_PODF(7))) | CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(0);
+  CCM_CDCDR = (CCM_CDCDR &
+               ~(CCM_CDCDR_FLEXIO1_CLK_SEL(3) | CCM_CDCDR_FLEXIO1_CLK_PRED(7) | CCM_CDCDR_FLEXIO1_CLK_PODF(7))) |
+              CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(0);
   //      | CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(7);
 }
 

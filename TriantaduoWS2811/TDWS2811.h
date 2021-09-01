@@ -107,7 +107,6 @@ private:
   static void _dmaIsr(void);
   void shifterIsr(void);
   void dmaIsr(void);
-  void configurePins(void);
   void configureFlexIO(void);
   void configurePll(void);
   void configureInterrupts(void);
@@ -118,7 +117,7 @@ private:
   DMAChannel dmaChannel;
   DMASetting dmaSetting[4];
   volatile uint8_t activeBuffer = 0;
-  volatile const uint32_t zeros[40] = {0};
+  volatile const uint32_t zeros[50] = {0};
   volatile const uint32_t ones = 0xFFFFFFFF;
   static TDWS2811 *pTD;
   IMXRT_FLEXIO_t *p = &pFlex->port();
