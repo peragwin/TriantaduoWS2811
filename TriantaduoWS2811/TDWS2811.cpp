@@ -34,7 +34,8 @@ SOFTWARE.
 
 TDWS2811 *TDWS2811::pTD = {nullptr};
 
-TDWS2811::TDWS2811()
+TDWS2811::TDWS2811(uint32_t ledCnt, uint32_t *activeBuffer, uint32_t *inactiveBuffer)
+    : frameBuffer{activeBuffer, inactiveBuffer}, ledCnt{ledCnt}
 {
   /* Get a FlexIO channel */
   pFlex = FlexIOHandler::flexIOHandler_list[FLEXMODULE];
@@ -51,6 +52,13 @@ TDWS2811::TDWS2811()
   configureDma();
 }
 
+TDWS2811::TDWS2811(uint32_t ledCnt)
+{
+  auto ab = (uint32_t *)malloc(ledCnt * 24 * 4);
+  auto ib = (uint32_t *)malloc(ledCnt * 24 * 4);
+  TDWS2811(ledCnt, ab, ib);
+}
+
 void TDWS2811::_dmaIsr(void)
 {
   TDWS2811::pTD->dmaIsr();
@@ -65,12 +73,12 @@ void TDWS2811::dmaIsr(void)
   if (TDWS2811::activeBuffer == 0)
   {
     TDWS2811::activeBuffer = 1;
-    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * LEDCOUNT * 4);
+    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * ledCnt * 4);
   }
   else
   {
     TDWS2811::activeBuffer = 0;
-    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * LEDCOUNT * 4);
+    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * ledCnt * 4);
   }
 
   /* Clear the interrupt so we don't get triggered again */
@@ -274,7 +282,7 @@ void TDWS2811::configureDma()
   p->SHIFTSDEN |= 0X00000002;
 
   /* TCD 0 is responsible for the bulk of the data transfer.  It shuffles data from the frame buffer to Shifter 1 */
-  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * LEDCOUNT * 4);
+  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * ledCnt * 4);
   dmaSetting[0].destination(p->SHIFTBUFBIS[1]);
   dmaSetting[0].replaceSettingsOnCompletion(dmaSetting[1]);
 
@@ -318,7 +326,7 @@ void TDWS2811::flipBuffers(void)
 int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t writeBuffer)
 {
   /* Set an LED's color and intensity */
-  if (led > LEDCOUNT)
+  if (led > ledCnt)
   {
     return 0;
   }
@@ -346,11 +354,12 @@ int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t w
     ledVal = (color.green << 24) + (color.red << 16) + (color.blue << 8);
   }
 
-  else if (channelType[channel] == GRBW)
-  {
-    bitCount = 32;
-    ledVal = (color.green << 24) + (color.red << 16) + (color.blue << 8) + color.white;
-  }
+  // FIXME
+  // else if (channelType[channel] == GRBW)
+  // {
+  //   bitCount = 32;
+  //   ledVal = (color.green << 24) + (color.red << 16) + (color.blue << 8) + color.white;
+  // }
 
   else
   {
@@ -377,13 +386,14 @@ int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t w
   return 1;
 }
 
-color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
+TDWS2811::color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
 {
   /* Returns the color and intensity value of an LED */
   uint32_t mask = 1 << channel;
   uint8_t i, bitCount = 24;
-  if (channelType[channel] == GRBW)
-    bitCount = 32;
+  // FIXME
+  // if (channelType[channel] == GRBW)
+  //   bitCount = 32;
   uint16_t base = led * bitCount;
   uint32_t out = 0;
   color_t color;
@@ -412,15 +422,16 @@ color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
     color.green = out & 0xFF;
     break;
 
-  case GRBW:
-    color.white = out & 0xFF;
-    out >>= 8;
-    color.blue = out & 0xFF;
-    out >>= 8;
-    color.red = out & 0xFF;
-    out >>= 8;
-    color.green = out & 0xFF;
-    break;
+    // FIXME
+    // case GRBW:
+    //   color.white = out & 0xFF;
+    //   out >>= 8;
+    //   color.blue = out & 0xFF;
+    //   out >>= 8;
+    //   color.red = out & 0xFF;
+    //   out >>= 8;
+    //   color.green = out & 0xFF;
+    //   break;
 
   default:
     return {0, 0, 0, 0};
@@ -428,19 +439,19 @@ color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
   return color;
 }
 
-void TDWS2811::setChannelType(uint8_t channel, channelType_t chanType)
+void TDWS2811::setChannelType(uint8_t channel, EOrder chanType)
 {
   /* Allows the user to change each channel to RGB, GRB, or GRBW formatting */
   channelType[channel] = chanType;
 }
 
-uint32_t *TDWS2811::getActiveBuffer(void)
+volatile uint32_t *TDWS2811::getActiveBuffer(void)
 {
   /* Returns a pointer to the active frame buffer.  Useful for developing more sophisticated buffer writing algorithms */
   return frameBuffer[activeBuffer];
 }
 
-uint32_t *TDWS2811::getInactiveBuffer(void)
+volatile uint32_t *TDWS2811::getInactiveBuffer(void)
 {
   /* Returns a pointer to the inactive frame buffer.  Useful for developing more sophisticated buffer writing algorithms */
   return frameBuffer[1 - activeBuffer];
