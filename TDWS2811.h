@@ -20,91 +20,207 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
+
+#ifndef TDWS2811_h
+#define TDWS2811_h
+
 #include <Arduino.h>
-#include "TDWS2811.h"
+#include <DMAChannel.h>
+#include <FlexIO_t4.h>
 
-#define CLOCK_PIN 2
-#define CLOCK_FIO_PINSEL 4
+#define FLEXMODULE 0
 
-#define LATCH_PIN 3
-#define LATCH_FIO_PINSEL 5
+#ifndef DEFAULT_CHANNEL_TYPE
+#define DEFAULT_CHANNEL_TYPE GRB
+#endif
 
-#define DATA_PIN 4
-#define DATA_FIO_PINSEL 6
+#define CCM_ANALOG_PLL_VIDEO_BYPASS_MASK (0x10000U)
+#define CCM_ANALOG_PLL_VIDEO_BYPASS_CLK_SRC_MASK (0xC000U)
+#define CCM_ANALOG_PLL_VIDEO_NUM_A_MASK (0x3FFFFFFFU)
+#define CCM_ANALOG_PLL_VIDEO_NUM_A_SHIFT (0U)
+#define CCM_ANALOG_PLL_VIDEO_NUM_A(x) (((uint32_t)(((uint32_t)(x)) << CCM_ANALOG_PLL_VIDEO_NUM_A_SHIFT)) & CCM_ANALOG_PLL_VIDEO_NUM_A_MASK)
+#define CCM_ANALOG_PLL_VIDEO_DENOM_B_MASK (0x3FFFFFFFU)
+#define CCM_ANALOG_PLL_VIDEO_DENOM_B_SHIFT (0U)
+#define CCM_ANALOG_PLL_VIDEO_DENOM_B(x) (((uint32_t)(((uint32_t)(x)) << CCM_ANALOG_PLL_VIDEO_DENOM_B_SHIFT)) & CCM_ANALOG_PLL_VIDEO_DENOM_B_MASK)
+#define CCM_ANALOG_PLL_VIDEO_DIV_SELECT_MASK (0x7FU)
+#define CCM_ANALOG_PLL_VIDEO_POWERDOWN_MASK (0x1000U)
+#define CCM_ANALOG_PLL_VIDEO_ENABLE_MASK (0x2000U)
+#define CCM_ANALOG_PLL_VIDEO_DIV_SELECT_MASK (0x7FU)
+#define CCM_ANALOG_MISC2_VIDEO_DIV_MASK (0xC0000000U)
+#define CCM_ANALOG_PLL_VIDEO_LOCK_MASK (0x80000000U)
 
-TDWS2811 *TDWS2811::pTD = {nullptr};
-
-TDWS2811::TDWS2811(uint32_t ledCnt, uint32_t *activeBuffer, uint32_t *inactiveBuffer)
-    : frameBuffer{activeBuffer, inactiveBuffer}, ledCnt{ledCnt}
+template <size_t NUM_LEDS = 300>
+class TDWS2811
 {
-  /* Get a FlexIO channel */
-  pFlex = FlexIOHandler::flexIOHandler_list[FLEXMODULE];
+public:
+  /// Taken from FastLED:
+  /// RGB orderings, used when instantiating controllers to determine what
+  /// order the controller should send RGB data out in, RGB being the default
+  /// ordering.
+  enum EOrder
+  {
+    RGB = 0012,
+    RBG = 0021,
+    GRB = 0102,
+    GBR = 0120,
+    BRG = 0201,
+    BGR = 0210
+  };
 
-  /* Pointer to the port structure in the FlexIO channel */
-  p = &pFlex->port();
+  enum bufferType_t
+  {
+    ACTIVE,
+    INACTIVE
+  };
 
-  /* Pointer to the hardware structure in the FlexIO channel */
-  hw = &pFlex->hardware();
+  struct color_t
+  {
+    uint8_t red = 0;
+    uint8_t green = 0;
+    uint8_t blue = 0;
+    uint8_t white = 0;
+  };
 
-  /* Now configure all the things */
-  configurePll();
-  configureFlexIO();
-  configureDma();
+  TDWS2811()
+  {
+    /* Get a FlexIO channel */
+    pFlex = FlexIOHandler::flexIOHandler_list[FLEXMODULE];
+
+    /* Pointer to the port structure in the FlexIO channel */
+    p = &pFlex->port();
+
+    /* Pointer to the hardware structure in the FlexIO channel */
+    hw = &pFlex->hardware();
+
+    /* Now configure all the things */
+    configurePll();
+    configureFlexIO();
+    configureDma();
+    pinMode(13, OUTPUT);
+    digitalWrite(13, 1);
+  }
+
+  /// Swap active and inactive frame buffers.  This function simply sets the ISR on completion flag of TCD 1 and that ISR handles the rest.
+  /// This is to synchronize the buffer swap with the frame blanking period in order to prevent tearing.
+  void
+  flipBuffers(void)
+  {
+    dmaSetting[1].TCD->CSR |= DMA_TCD_CSR_INTMAJOR;
+  }
+
+  /// Returns a pointer to the active frame buffer.  Useful for developing more sophisticated buffer writing algorithms
+  uint32_t *getActiveBuffer(void)
+  {
+    return frameBuffer[activeBuffer];
+  }
+
+  /// Returns a pointer to the inactive frame buffer.  Useful for developing more sophisticated buffer writing algorithms
+  uint32_t *getInactiveBuffer(void)
+  {
+    return frameBuffer[1 - activeBuffer];
+  }
+
+  /// Allows the user to change each channel to RGB, GRB, or GRBW formatting
+  void setChannelType(uint8_t channel, EOrder chanType)
+  {
+    channelType[channel] = chanType;
+  }
+
+  int setLed(uint8_t, uint8_t, color_t, bufferType_t writeBuffer = ACTIVE);
+  color_t getLed(uint8_t, uint16_t);
+
+private:
+  static void _shifterIsr(void);
+  static void _dmaIsr(void);
+  void shifterIsr(void);
+  void dmaIsr(void);
+  void configureFlexIO(void);
+  void configurePll(void);
+  void configureInterrupts(void);
+  void configureDma(void);
+  void dumpDMA_TCD(DMAChannel *);
+
+  FlexIOHandler *pFlex;
+  DMAChannel dmaChannel;
+  DMASetting dmaSetting[4];
+
+  volatile uint8_t activeBuffer = 0;
+  uint32_t frameBuffer[2][24 * NUM_LEDS] = {{0}, {0}};
+
+  volatile const uint32_t zeros[300] = {0};
+  volatile const uint32_t ones = 0xFFFFFFFF;
+
+  static TDWS2811<NUM_LEDS> *pTD;
+
+  IMXRT_FLEXIO_t *p = &pFlex->port();
+  const FlexIOHandler::FLEXIO_Hardware_t *hw = &pFlex->hardware();
+
+  EOrder channelType[32] = {DEFAULT_CHANNEL_TYPE};
+};
+
+#define TDWS_CLOCK_PIN 2
+#define TDWS_CLOCK_FIO_PINSEL 4
+
+#define TDWS_LATCH_PIN 3
+#define TDWS_LATCH_FIO_PINSEL 5
+
+#define TDWS_DATA_PIN 4
+#define TDWS_DATA_FIO_PINSEL 6
+
+template <size_t NUM_LEDS>
+TDWS2811<NUM_LEDS> *TDWS2811<NUM_LEDS>::pTD = {nullptr};
+
+template <size_t NUM_LEDS>
+void TDWS2811<NUM_LEDS>::_dmaIsr(void)
+{
+  TDWS2811<NUM_LEDS>::pTD->dmaIsr();
 }
 
-TDWS2811::TDWS2811(uint32_t ledCnt)
-{
-  auto ab = (uint32_t *)malloc(ledCnt * 24 * 4);
-  auto ib = (uint32_t *)malloc(ledCnt * 24 * 4);
-  TDWS2811(ledCnt, ab, ib);
-}
-
-void TDWS2811::_dmaIsr(void)
-{
-  TDWS2811::pTD->dmaIsr();
-}
-
-void TDWS2811::dmaIsr(void)
+template <size_t NUM_LEDS>
+void TDWS2811<NUM_LEDS>::dmaIsr(void)
 {
   /* Disable interrupts on TCD 1.  If there's a "disable interrupt" function in DMASetting, we should use that, but I don't see one */
-  TDWS2811::dmaSetting[1].TCD->CSR &= ~DMA_TCD_CSR_INTMAJOR;
+  dmaSetting[1].TCD->CSR &= ~DMA_TCD_CSR_INTMAJOR;
 
   /* Swap the buffer pointer in TCD 0 */
-  if (TDWS2811::activeBuffer == 0)
+  if (activeBuffer == 0)
   {
-    TDWS2811::activeBuffer = 1;
-    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * ledCnt * 4);
+    activeBuffer = 1;
+    digitalWrite(13, 1);
+    dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * NUM_LEDS * 4);
   }
   else
   {
-    TDWS2811::activeBuffer = 0;
-    TDWS2811::dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * ledCnt * 4);
+    activeBuffer = 0;
+    digitalWrite(13, 0);
+    dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * NUM_LEDS * 4);
   }
 
   /* Clear the interrupt so we don't get triggered again */
-  TDWS2811::dmaChannel.clearInterrupt();
+  dmaChannel.clearInterrupt();
 
   /* Spin for a few cycles.  If we don't do this, the interrupt doesn't clear and we get triggered a second time */
   for (uint8_t i = 0; i < 10; i++)
     __asm__ __volatile__("nop\n\t"); //Some race condition between clearInterrupt() and the return of the ISR.  If we don't delay here, the ISR will fire again.
 }
 
-void TDWS2811::configureFlexIO(void)
+template <size_t NUM_LEDS>
+void TDWS2811<NUM_LEDS>::configureFlexIO(void)
 {
-  *portModeRegister(DATA_PIN) |= digitalPinToBitMask(DATA_PIN);
-  *portControlRegister(DATA_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  *portModeRegister(TDWS_DATA_PIN) |= digitalPinToBitMask(TDWS_DATA_PIN);
+  *portControlRegister(TDWS_DATA_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
   // SION + ALT4 (FLEXIO1_FLEXIO6) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_06)
-  *portConfigRegister(DATA_PIN) = 0x14;
+  *portConfigRegister(TDWS_DATA_PIN) = 0x14;
 
-  *portModeRegister(LATCH_PIN) |= digitalPinToBitMask(LATCH_PIN);
-  *portControlRegister(LATCH_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  *portModeRegister(TDWS_LATCH_PIN) |= digitalPinToBitMask(TDWS_LATCH_PIN);
+  *portControlRegister(TDWS_LATCH_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
   // SION + ALT4 (FLEXIO1_FLEXIO05) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_05)
-  *portConfigRegister(LATCH_PIN) = 0x14;
+  *portConfigRegister(TDWS_LATCH_PIN) = 0x14;
 
-  *portModeRegister(CLOCK_PIN) |= digitalPinToBitMask(CLOCK_PIN);
-  *portControlRegister(CLOCK_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
+  *portModeRegister(TDWS_CLOCK_PIN) |= digitalPinToBitMask(TDWS_CLOCK_PIN);
+  *portControlRegister(TDWS_CLOCK_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
   // SION + ALT4 (FLEXIO1_FLEXIO04) (IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_04)
-  *portConfigRegister(CLOCK_PIN) = 0x14;
+  *portConfigRegister(TDWS_CLOCK_PIN) = 0x14;
 
   // Disable flexio1 clock gate see 14.7.24 page 1087
   CCM_CCGR5 &= ~CCM_CCGR5_FLEXIO1(CCM_CCGR_ON);
@@ -125,7 +241,7 @@ void TDWS2811::configureFlexIO(void)
       // Shifter pin configuration -> shifter pin output
       FLEXIO_SHIFTCTL_PINCFG(3) |
       // Shifter pin select FLEXIO06 pin (DATA on pin 4)
-      FLEXIO_SHIFTCTL_PINSEL(DATA_FIO_PINSEL) |
+      FLEXIO_SHIFTCTL_PINSEL(TDWS_DATA_FIO_PINSEL) |
       // Shifter pin polarity -> pin is active high
       (FLEXIO_SHIFTCTL_PINPOL & 0) |
       // Shifter mode -> Transmit mode. Load SHIFTBUF contents into
@@ -185,7 +301,7 @@ void TDWS2811::configureFlexIO(void)
       // Timer pin configuration -> timer pin output
       FLEXIO_TIMCTL_PINCFG(3) |
       // Timer pin select -> FLEXIO04 (CLOCK on pin 2)
-      FLEXIO_TIMCTL_PINSEL(CLOCK_FIO_PINSEL) |
+      FLEXIO_TIMCTL_PINSEL(TDWS_CLOCK_FIO_PINSEL) |
       // Timer pin polarity -> active high
       (FLEXIO_TIMCTL_PINPOL & 0) |
       // Timer mode -> dual 8 bit counters baud mode
@@ -196,7 +312,7 @@ void TDWS2811::configureFlexIO(void)
       // Timer pin configuration -> timer pin output
       FLEXIO_TIMCTL_PINCFG(3) |
       // Timer pin select -> FLEXIO05 (LATCH on pin 3)
-      FLEXIO_TIMCTL_PINSEL(LATCH_FIO_PINSEL) |
+      FLEXIO_TIMCTL_PINSEL(TDWS_LATCH_FIO_PINSEL) |
       // Timer pin polarity -> active high
       (FLEXIO_TIMCTL_PINPOL & 0) |
       // Timer mode -> single 16-bit counter mode
@@ -228,7 +344,8 @@ void TDWS2811::configureFlexIO(void)
   IMXRT_FLEXIO1_S.CTRL = FLEXIO_CTRL_FLEXEN;
 }
 
-void TDWS2811::configurePll(void)
+template <size_t NUM_LEDS>
+void TDWS2811<NUM_LEDS>::configurePll(void)
 {
   /* Set up PLL5 (also known as "PLL_VIDEO" and "PLL_528"), connect to FlexIO1 */
   uint32_t pllVideo;
@@ -276,13 +393,14 @@ void TDWS2811::configurePll(void)
   //      | CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(7);
 }
 
-void TDWS2811::configureDma()
+template <size_t NUM_LEDS>
+void TDWS2811<NUM_LEDS>::configureDma()
 {
   /* Enable DMA trigger on Shifter 1 */
   p->SHIFTSDEN |= 0X00000002;
 
   /* TCD 0 is responsible for the bulk of the data transfer.  It shuffles data from the frame buffer to Shifter 1 */
-  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * ledCnt * 4);
+  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * NUM_LEDS * 4);
   dmaSetting[0].destination(p->SHIFTBUFBIS[1]);
   dmaSetting[0].replaceSettingsOnCompletion(dmaSetting[1]);
 
@@ -316,17 +434,11 @@ void TDWS2811::configureDma()
   dmaChannel.enable();
 }
 
-void TDWS2811::flipBuffers(void)
-{
-  /* Swap active and inactive frame buffers.  This function simply sets the ISR on completion flag of TCD 1 and that ISR handles the rest.
-  This is to synchronize the buffer swap with the frame blanking period in order to prevent tearing. */
-  dmaSetting[1].TCD->CSR |= DMA_TCD_CSR_INTMAJOR;
-}
-
-int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t writeBuffer)
+template <size_t NUM_LEDS>
+int TDWS2811<NUM_LEDS>::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t writeBuffer)
 {
   /* Set an LED's color and intensity */
-  if (led > ledCnt)
+  if (led > NUM_LEDS)
   {
     return 0;
   }
@@ -386,7 +498,8 @@ int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t w
   return 1;
 }
 
-TDWS2811::color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
+template <size_t NUM_LEDS>
+typename TDWS2811<NUM_LEDS>::color_t TDWS2811<NUM_LEDS>::getLed(uint8_t channel, uint16_t led)
 {
   /* Returns the color and intensity value of an LED */
   uint32_t mask = 1 << channel;
@@ -439,20 +552,4 @@ TDWS2811::color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
   return color;
 }
 
-void TDWS2811::setChannelType(uint8_t channel, EOrder chanType)
-{
-  /* Allows the user to change each channel to RGB, GRB, or GRBW formatting */
-  channelType[channel] = chanType;
-}
-
-volatile uint32_t *TDWS2811::getActiveBuffer(void)
-{
-  /* Returns a pointer to the active frame buffer.  Useful for developing more sophisticated buffer writing algorithms */
-  return frameBuffer[activeBuffer];
-}
-
-volatile uint32_t *TDWS2811::getInactiveBuffer(void)
-{
-  /* Returns a pointer to the inactive frame buffer.  Useful for developing more sophisticated buffer writing algorithms */
-  return frameBuffer[1 - activeBuffer];
-}
+#endif
