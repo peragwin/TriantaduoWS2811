@@ -49,7 +49,6 @@ SOFTWARE.
 #define CCM_ANALOG_MISC2_VIDEO_DIV_MASK (0xC0000000U)
 #define CCM_ANALOG_PLL_VIDEO_LOCK_MASK (0x80000000U)
 
-template <size_t NUM_LEDS = 300>
 class TDWS2811
 {
 public:
@@ -81,7 +80,8 @@ public:
     uint8_t white = 0;
   };
 
-  TDWS2811()
+  TDWS2811(int num_leds, uint32_t *active_buffer, uint32_t *inactive_buffer)
+      : num_leds{num_leds}, frameBuffer{active_buffer, inactive_buffer}
   {
     /* Get a FlexIO channel */
     pFlex = FlexIOHandler::flexIOHandler_list[FLEXMODULE];
@@ -91,19 +91,22 @@ public:
 
     /* Pointer to the hardware structure in the FlexIO channel */
     hw = &pFlex->hardware();
+  }
 
+  void begin()
+  {
     /* Now configure all the things */
     configurePll();
     configureFlexIO();
     configureDma();
+
     pinMode(13, OUTPUT);
     digitalWrite(13, 1);
   }
 
   /// Swap active and inactive frame buffers.  This function simply sets the ISR on completion flag of TCD 1 and that ISR handles the rest.
   /// This is to synchronize the buffer swap with the frame blanking period in order to prevent tearing.
-  void
-  flipBuffers(void)
+  void flipBuffers(void)
   {
     dmaSetting[1].TCD->CSR |= DMA_TCD_CSR_INTMAJOR;
   }
@@ -126,10 +129,14 @@ public:
     channelType[channel] = chanType;
   }
 
+  int size() { return num_leds; }
+
   int setLed(uint8_t, uint8_t, color_t, bufferType_t writeBuffer = ACTIVE);
   color_t getLed(uint8_t, uint16_t);
 
 private:
+  int num_leds;
+
   static void _shifterIsr(void);
   static void _dmaIsr(void);
   void shifterIsr(void);
@@ -145,12 +152,12 @@ private:
   DMASetting dmaSetting[4];
 
   volatile uint8_t activeBuffer = 0;
-  uint32_t frameBuffer[2][24 * NUM_LEDS] = {{0}, {0}};
+  uint32_t *frameBuffer[2];
 
   volatile const uint32_t zeros[300] = {0};
   volatile const uint32_t ones = 0xFFFFFFFF;
 
-  static TDWS2811<NUM_LEDS> *pTD;
+  static TDWS2811 *pTD;
 
   IMXRT_FLEXIO_t *p = &pFlex->port();
   const FlexIOHandler::FLEXIO_Hardware_t *hw = &pFlex->hardware();
@@ -167,17 +174,14 @@ private:
 #define TDWS_DATA_PIN 4
 #define TDWS_DATA_FIO_PINSEL 6
 
-template <size_t NUM_LEDS>
-TDWS2811<NUM_LEDS> *TDWS2811<NUM_LEDS>::pTD = {nullptr};
+TDWS2811 *TDWS2811::pTD = {nullptr};
 
-template <size_t NUM_LEDS>
-void TDWS2811<NUM_LEDS>::_dmaIsr(void)
+void TDWS2811::_dmaIsr(void)
 {
-  TDWS2811<NUM_LEDS>::pTD->dmaIsr();
+  TDWS2811::pTD->dmaIsr();
 }
 
-template <size_t NUM_LEDS>
-void TDWS2811<NUM_LEDS>::dmaIsr(void)
+void TDWS2811::dmaIsr(void)
 {
   /* Disable interrupts on TCD 1.  If there's a "disable interrupt" function in DMASetting, we should use that, but I don't see one */
   dmaSetting[1].TCD->CSR &= ~DMA_TCD_CSR_INTMAJOR;
@@ -187,13 +191,13 @@ void TDWS2811<NUM_LEDS>::dmaIsr(void)
   {
     activeBuffer = 1;
     digitalWrite(13, 1);
-    dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * NUM_LEDS * 4);
+    dmaSetting[0].sourceBuffer(frameBuffer[1], 24 * num_leds * 4);
   }
   else
   {
     activeBuffer = 0;
     digitalWrite(13, 0);
-    dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * NUM_LEDS * 4);
+    dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * num_leds * 4);
   }
 
   /* Clear the interrupt so we don't get triggered again */
@@ -204,8 +208,7 @@ void TDWS2811<NUM_LEDS>::dmaIsr(void)
     __asm__ __volatile__("nop\n\t"); //Some race condition between clearInterrupt() and the return of the ISR.  If we don't delay here, the ISR will fire again.
 }
 
-template <size_t NUM_LEDS>
-void TDWS2811<NUM_LEDS>::configureFlexIO(void)
+void TDWS2811::configureFlexIO(void)
 {
   *portModeRegister(TDWS_DATA_PIN) |= digitalPinToBitMask(TDWS_DATA_PIN);
   *portControlRegister(TDWS_DATA_PIN) = IOMUXC_PAD_DSE(7) | IOMUXC_PAD_SPEED(2);
@@ -344,8 +347,7 @@ void TDWS2811<NUM_LEDS>::configureFlexIO(void)
   IMXRT_FLEXIO1_S.CTRL = FLEXIO_CTRL_FLEXEN;
 }
 
-template <size_t NUM_LEDS>
-void TDWS2811<NUM_LEDS>::configurePll(void)
+void TDWS2811::configurePll(void)
 {
   /* Set up PLL5 (also known as "PLL_VIDEO" and "PLL_528"), connect to FlexIO1 */
   uint32_t pllVideo;
@@ -393,14 +395,13 @@ void TDWS2811<NUM_LEDS>::configurePll(void)
   //      | CCM_CDCDR_FLEXIO1_CLK_SEL(2) | CCM_CDCDR_FLEXIO1_CLK_PRED(4) | CCM_CDCDR_FLEXIO1_CLK_PODF(7);
 }
 
-template <size_t NUM_LEDS>
-void TDWS2811<NUM_LEDS>::configureDma()
+void TDWS2811::configureDma()
 {
   /* Enable DMA trigger on Shifter 1 */
   p->SHIFTSDEN |= 0X00000002;
 
   /* TCD 0 is responsible for the bulk of the data transfer.  It shuffles data from the frame buffer to Shifter 1 */
-  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * NUM_LEDS * 4);
+  dmaSetting[0].sourceBuffer(frameBuffer[0], 24 * num_leds * 4);
   dmaSetting[0].destination(p->SHIFTBUFBIS[1]);
   dmaSetting[0].replaceSettingsOnCompletion(dmaSetting[1]);
 
@@ -434,11 +435,10 @@ void TDWS2811<NUM_LEDS>::configureDma()
   dmaChannel.enable();
 }
 
-template <size_t NUM_LEDS>
-int TDWS2811<NUM_LEDS>::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t writeBuffer)
+int TDWS2811::setLed(uint8_t channel, uint8_t led, color_t color, bufferType_t writeBuffer)
 {
   /* Set an LED's color and intensity */
-  if (led > NUM_LEDS)
+  if (led > num_leds)
   {
     return 0;
   }
@@ -498,8 +498,7 @@ int TDWS2811<NUM_LEDS>::setLed(uint8_t channel, uint8_t led, color_t color, buff
   return 1;
 }
 
-template <size_t NUM_LEDS>
-typename TDWS2811<NUM_LEDS>::color_t TDWS2811<NUM_LEDS>::getLed(uint8_t channel, uint16_t led)
+typename TDWS2811::color_t TDWS2811::getLed(uint8_t channel, uint16_t led)
 {
   /* Returns the color and intensity value of an LED */
   uint32_t mask = 1 << channel;

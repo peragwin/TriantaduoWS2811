@@ -1,14 +1,20 @@
 {
   "name": "TriantaduoWS2811",
+  "description": "32 channel WS2811 driver using FlexIO",
+  "keywords": "ws2811,flexio",
   "repository": {
     "type": "git",
     "url": "https://github.com/peragwin/TriantaduoWS2811.git"
   },
+  "license": "MIT",
   "version": "0.1.0",
   "frameworks": "arduino",
   "platforms": "teensy",
+  "export": {
+    "include": ["TDWS2811.h"],
+    "exclude": ["Docs/*", "TDWS2811_Example/*"]
+  },
   "build": {
-    "srcFilter": ["+<*.h>"],
     "libArchive": false
   }
 }
